@@ -37,7 +37,8 @@ import type {
   Message,
   UnknownField,
 } from "./types.js";
-import { BinaryReader, BinaryWriter } from "./wire/binary-encoding.js";
+import { BinaryReader } from "./wire/binary-encoding.js";
+import { ReverseWriter } from "./wire/reverse-writer.js";
 import { isWrapperDesc } from "./wkt/wrappers.js";
 import type {
   EnumOptions,
@@ -95,7 +96,7 @@ export function setExtension<Desc extends DescExtension>(
     (uf) => uf.no !== extension.number,
   );
   const [container, field] = createExtensionContainer(extension, value);
-  const writer = new BinaryWriter();
+  const writer = new ReverseWriter();
   writeField(writer, { writeUnknownFields: true }, container, field);
   const reader = new BinaryReader(writer.finish());
   while (reader.pos < reader.len) {

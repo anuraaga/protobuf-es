@@ -14,7 +14,8 @@
 
 import type { MessageShape } from "./types.js";
 import { reflect } from "./reflect/reflect.js";
-import { BinaryWriter, WireType } from "./wire/binary-encoding.js";
+import { WireType } from "./wire/binary-encoding.js";
+import { ReverseWriter } from "./wire/reverse-writer.js";
 import type { ScalarValue } from "./reflect/scalar.js";
 import { type DescField, type DescMessage, ScalarType } from "./descriptors.js";
 import type { ReflectList, ReflectMessage } from "./reflect/index.js";
@@ -55,18 +56,40 @@ export function toBinary<Desc extends DescMessage>(
   options?: Partial<BinaryWriteOptions>,
 ): Uint8Array<ArrayBuffer> {
   return writeFields(
-    new BinaryWriter(),
+    new ReverseWriter(),
     makeWriteOptions(options),
     reflect(schema, message),
   ).finish();
 }
 
+/**
+ * Write all fields of the message.
+ *
+ * The writer fills its buffer from back to front, so everything is written
+ * in reverse: unknown fields (which come last on the wire) first, then the
+ * fields from the highest field number to the lowest, and for each value the
+ * payload before its tag. Once a length-delimited payload is written, its
+ * size is known, and the length prefix is prepended - the buffer never has
+ * to shift already-written bytes to make room for it.
+ */
 function writeFields(
-  writer: BinaryWriter,
+  writer: ReverseWriter,
   opts: BinaryWriteOptions,
   msg: ReflectMessage,
-): BinaryWriter {
-  for (const f of msg.sortedFields) {
+): ReverseWriter {
+  if (opts.writeUnknownFields) {
+    const unknown = msg.getUnknown();
+    if (unknown !== undefined) {
+      for (let i = unknown.length - 1; i >= 0; i--) {
+        const { no, wireType, data } = unknown[i];
+        writer.raw(data);
+        writer.tag(no, wireType);
+      }
+    }
+  }
+  const fields = msg.sortedFields;
+  for (let i = fields.length - 1; i >= 0; i--) {
+    const f = fields[i];
     if (!msg.isSet(f)) {
       if (f.presence == LEGACY_REQUIRED) {
         throw new Error(`cannot encode ${f} to binary: required field not set`);
@@ -75,11 +98,6 @@ function writeFields(
     }
     writeField(writer, opts, msg, f);
   }
-  if (opts.writeUnknownFields) {
-    for (const { no, wireType, data } of msg.getUnknown() ?? []) {
-      writer.tag(no, wireType).raw(data);
-    }
-  }
   return writer;
 }
 
@@ -87,7 +105,7 @@ function writeFields(
  * @private
  */
 export function writeField(
-  writer: BinaryWriter,
+  writer: ReverseWriter,
   opts: BinaryWriteOptions,
   msg: ReflectMessage,
   field: DescField,
@@ -110,16 +128,18 @@ export function writeField(
     case "message":
       writeMessageField(writer, opts, field, msg.get(field));
       break;
-    case "map":
-      for (const [key, val] of msg.get(field)) {
-        writeMapEntry(writer, opts, field, key, val);
+    case "map": {
+      const entries = Array.from(msg.get(field));
+      for (let i = entries.length - 1; i >= 0; i--) {
+        writeMapEntry(writer, opts, field, entries[i][0], entries[i][1]);
       }
       break;
+    }
   }
 }
 
 function writeScalar(
-  writer: BinaryWriter,
+  writer: ReverseWriter,
   msgName: string,
   fieldName: string,
   scalarType: ScalarType,
@@ -127,45 +147,43 @@ function writeScalar(
   value: unknown,
 ) {
   writeScalarValue(
-    writer.tag(fieldNo, writeTypeOfScalar(scalarType)),
+    writer,
     msgName,
     fieldName,
     scalarType,
     value as ScalarValue,
   );
+  writer.tag(fieldNo, writeTypeOfScalar(scalarType));
 }
 
 function writeMessageField(
-  writer: BinaryWriter,
+  writer: ReverseWriter,
   opts: BinaryWriteOptions,
   field: DescField &
     ({ fieldKind: "message" } | { fieldKind: "list"; listKind: "message" }),
   message: ReflectMessage,
 ) {
   if (field.delimitedEncoding) {
-    writeFields(
-      writer.tag(field.number, WireType.StartGroup),
-      opts,
-      message,
-    ).tag(field.number, WireType.EndGroup);
+    writer.tag(field.number, WireType.EndGroup);
+    writeFields(writer, opts, message);
+    writer.tag(field.number, WireType.StartGroup);
   } else {
-    writeFields(
-      writer.tag(field.number, WireType.LengthDelimited).fork(),
-      opts,
-      message,
-    ).join();
+    const before = writer.length;
+    writeFields(writer, opts, message);
+    writer.uint32(writer.length - before);
+    writer.tag(field.number, WireType.LengthDelimited);
   }
 }
 
 function writeListField(
-  writer: BinaryWriter,
+  writer: ReverseWriter,
   opts: BinaryWriteOptions,
   field: DescField & { fieldKind: "list" },
   list: ReflectList,
 ) {
   if (field.listKind == "message") {
-    for (const item of list) {
-      writeMessageField(writer, opts, field, item as ReflectMessage);
+    for (let i = list.size - 1; i >= 0; i--) {
+      writeMessageField(writer, opts, field, list.get(i) as ReflectMessage);
     }
     return;
   }
@@ -174,42 +192,40 @@ function writeListField(
     if (!list.size) {
       return;
     }
-    writer.tag(field.number, WireType.LengthDelimited).fork();
-    for (const item of list) {
+    const before = writer.length;
+    for (let i = list.size - 1; i >= 0; i--) {
       writeScalarValue(
         writer,
         field.parent.typeName,
         field.name,
         scalarType,
-        item as ScalarValue,
+        list.get(i) as ScalarValue,
       );
     }
-    writer.join();
+    writer.uint32(writer.length - before);
+    writer.tag(field.number, WireType.LengthDelimited);
     return;
   }
-  for (const item of list) {
+  for (let i = list.size - 1; i >= 0; i--) {
     writeScalar(
       writer,
       field.parent.typeName,
       field.name,
       scalarType,
       field.number,
-      item,
+      list.get(i),
     );
   }
 }
 
 function writeMapEntry(
-  writer: BinaryWriter,
+  writer: ReverseWriter,
   opts: BinaryWriteOptions,
   field: DescField & { fieldKind: "map" },
   key: unknown,
   value: unknown,
 ) {
-  writer.tag(field.number, WireType.LengthDelimited).fork();
-
-  // write key, expecting key field number = 1
-  writeScalar(writer, field.parent.typeName, field.name, field.mapKey, 1, key);
+  const before = writer.length;
 
   // write value, expecting value field number = 2
   switch (field.mapKind) {
@@ -224,19 +240,24 @@ function writeMapEntry(
         value,
       );
       break;
-    case "message":
-      writeFields(
-        writer.tag(2, WireType.LengthDelimited).fork(),
-        opts,
-        value as ReflectMessage,
-      ).join();
+    case "message": {
+      const beforeValue = writer.length;
+      writeFields(writer, opts, value as ReflectMessage);
+      writer.uint32(writer.length - beforeValue);
+      writer.tag(2, WireType.LengthDelimited);
       break;
+    }
   }
-  writer.join();
+
+  // write key, expecting key field number = 1
+  writeScalar(writer, field.parent.typeName, field.name, field.mapKey, 1, key);
+
+  writer.uint32(writer.length - before);
+  writer.tag(field.number, WireType.LengthDelimited);
 }
 
 function writeScalarValue(
-  writer: BinaryWriter,
+  writer: ReverseWriter,
   msgName: string,
   fieldName: string,
   type: ScalarType,

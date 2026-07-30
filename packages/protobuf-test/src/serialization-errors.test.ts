@@ -144,9 +144,11 @@ void suite("serialization errors", () => {
       });
     });
     test("toBinary", () => {
+      // toBinary writes fields from the highest field number to the lowest,
+      // so with several required fields unset, it reports the highest one.
       assert.throws(() => toBinary(desc, msg), {
         message:
-          /^cannot encode field spec.Proto2Message.required_string_field to binary: required field not set$/,
+          /^cannot encode field spec.Proto2Message.required_default_wrapped_uint32_field to binary: required field not set$/,
       });
     });
   });

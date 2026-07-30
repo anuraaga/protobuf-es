@@ -15,6 +15,20 @@
 import { varint32read, varint64read } from "./varint.js";
 import { protoInt64 } from "../proto-int64.js";
 import { getTextEncoding } from "./text-encoding.js";
+import {
+  assertFloat32,
+  assertInt32,
+  assertUInt32,
+  varint32Size,
+} from "./assert.js";
+
+export {
+  FLOAT32_MAX,
+  FLOAT32_MIN,
+  UINT32_MAX,
+  INT32_MAX,
+  INT32_MIN,
+} from "./assert.js";
 
 /**
  * Protobuf binary format wire types.
@@ -62,31 +76,6 @@ export enum WireType {
    */
   Bit32 = 5,
 }
-
-/**
- * Maximum value for a 32-bit floating point value (Protobuf FLOAT).
- */
-export const FLOAT32_MAX = 3.4028234663852886e38;
-
-/**
- * Minimum value for a 32-bit floating point value (Protobuf FLOAT).
- */
-export const FLOAT32_MIN = -3.4028234663852886e38;
-
-/**
- * Maximum value for an unsigned 32-bit integer (Protobuf UINT32, FIXED32).
- */
-export const UINT32_MAX = 0xffffffff;
-
-/**
- * Maximum value for a signed 32-bit integer (Protobuf INT32, SFIXED32, SINT32).
- */
-export const INT32_MAX = 0x7fffffff;
-
-/**
- * Minimum value for a signed 32-bit integer (Protobuf INT32, SFIXED32, SINT32).
- */
-export const INT32_MIN = -0x80000000;
 
 export class BinaryWriter {
   /**
@@ -455,17 +444,6 @@ const EMPTY_BUFFER = new Uint8Array(0) as Uint8Array<ArrayBuffer>;
  */
 const EMPTY_VIEW = new DataView(EMPTY_BUFFER.buffer);
 
-/**
- * Number of bytes needed to encode `value` as an unsigned 32-bit varint.
- */
-function varint32Size(value: number): number {
-  if (value < 0x80) return 1;
-  if (value < 0x4000) return 2;
-  if (value < 0x200000) return 3;
-  if (value < 0x10000000) return 4;
-  return 5;
-}
-
 export class BinaryReader {
   /**
    * Current position.
@@ -690,58 +668,4 @@ export class BinaryReader {
   string(strict?: boolean): string {
     return this.decodeUtf8(this.bytes(), strict);
   }
-}
-
-/**
- * Assert a valid signed protobuf 32-bit integer as a number or string.
- */
-function assertInt32(arg: unknown): asserts arg is number {
-  if (typeof arg == "string") {
-    arg = Number(arg);
-  } else if (typeof arg != "number") {
-    throw new Error("invalid int32: " + typeof arg);
-  }
-  if (
-    !Number.isInteger(arg) ||
-    (arg as number) > INT32_MAX ||
-    (arg as number) < INT32_MIN
-  )
-    throw new Error("invalid int32: " + arg);
-}
-
-/**
- * Assert a valid unsigned protobuf 32-bit integer as a number or string.
- */
-function assertUInt32(arg: unknown): asserts arg is number {
-  if (typeof arg == "string") {
-    arg = Number(arg);
-  } else if (typeof arg != "number") {
-    throw new Error("invalid uint32: " + typeof arg);
-  }
-  if (
-    !Number.isInteger(arg) ||
-    (arg as number) > UINT32_MAX ||
-    (arg as number) < 0
-  )
-    throw new Error("invalid uint32: " + arg);
-}
-
-/**
- * Assert a valid protobuf float value as a number or string.
- */
-function assertFloat32(arg: unknown): asserts arg is number {
-  if (typeof arg == "string") {
-    const o = arg;
-    arg = Number(arg);
-    if (Number.isNaN(arg as number) && o !== "NaN") {
-      throw new Error("invalid float32: " + o);
-    }
-  } else if (typeof arg != "number") {
-    throw new Error("invalid float32: " + typeof arg);
-  }
-  if (
-    Number.isFinite(arg) &&
-    ((arg as number) > FLOAT32_MAX || (arg as number) < FLOAT32_MIN)
-  )
-    throw new Error("invalid float32: " + arg);
 }
